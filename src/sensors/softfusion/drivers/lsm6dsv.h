@@ -57,7 +57,7 @@ struct LSM6DSV : LSM6DSOutputHandler<I2CImpl> {
 	struct Regs {
 		struct WhoAmI {
 			static constexpr uint8_t reg = 0x0f;
-			static constexpr uint8_t value = 0x70;
+			static constexpr uint8_t value = 0x71;	// TODO change back to 0x70
 		};
 		static constexpr uint8_t OutTemp = 0x20;
 		struct HAODRCFG {
