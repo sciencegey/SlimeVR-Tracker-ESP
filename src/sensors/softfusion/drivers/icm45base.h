@@ -24,21 +24,22 @@
 #include <array>
 #include <cstdint>
 
+#include "../../../sensorinterface/RegisterInterface.h"
+
 namespace SlimeVR::Sensors::SoftFusion::Drivers {
 
 // Driver uses acceleration range at 32g
 // and gyroscope range at 4000dps
 // using high resolution mode
 // Uses 32.768kHz clock
-// Gyroscope ODR = 409.6Hz, accel ODR = 204.8Hz
+// Gyroscope ODR = 409.6Hz, accel ODR = 102.4Hz
 // Timestamps reading not used, as they're useless (constant predefined increment)
 
-template <typename I2CImpl>
 struct ICM45Base {
 	static constexpr uint8_t Address = 0x68;
 
 	static constexpr float GyrTs = 1.0 / 409.6;
-	static constexpr float AccTs = 1.0 / 204.8;
+	static constexpr float AccTs = 1.0 / 102.4;
 	static constexpr float TempTs = 1.0 / 409.6;
 
 	static constexpr float MagTs = 1.0 / 100;
@@ -49,13 +50,15 @@ struct ICM45Base {
 	static constexpr float TemperatureBias = 25.0f;
 	static constexpr float TemperatureSensitivity = 128.0f;
 
+	static constexpr float TemperatureZROChange = 20.0f;
+
 	static constexpr bool Uses32BitSensorData = true;
 
-	I2CImpl i2c;
-	SlimeVR::Logging::Logger& logger;
-	ICM45Base(I2CImpl i2c, SlimeVR::Logging::Logger& logger)
-		: i2c(i2c)
-		, logger(logger) {}
+	RegisterInterface& m_RegisterInterface;
+	SlimeVR::Logging::Logger& m_Logger;
+	ICM45Base(RegisterInterface& registerInterface, SlimeVR::Logging::Logger& logger)
+		: m_RegisterInterface(registerInterface)
+		, m_Logger(logger) {}
 
 	struct BaseRegs {
 		static constexpr uint8_t TempData = 0x0c;
@@ -74,7 +77,7 @@ struct ICM45Base {
 		struct AccelConfig {
 			static constexpr uint8_t reg = 0x1b;
 			static constexpr uint8_t value
-				= (0b000 << 4) | 0b1000;  // 32g, odr = 204.8Hz
+				= (0b000 << 4) | 0b1001;  // 32g, odr = 102.4Hz
 		};
 
 		struct FifoConfig0 {
@@ -106,86 +109,135 @@ struct ICM45Base {
 
 #pragma pack(push, 1)
 	struct FifoEntryAligned {
-		union {
-			struct {
-				int16_t accel[3];
-				int16_t gyro[3];
-				uint16_t temp;
-				uint16_t timestamp;
-				uint8_t lsb[3];
-			} part;
-			uint8_t raw[19];
-		};
+		int16_t accel[3];
+		int16_t gyro[3];
+		uint16_t temp;
+		uint16_t timestamp;
+		uint8_t lsb[3];
 	};
 #pragma pack(pop)
 
 	static constexpr size_t FullFifoEntrySize = sizeof(FifoEntryAligned) + 1;
 
 	void softResetIMU() {
-		i2c.writeReg(BaseRegs::DeviceConfig::reg, BaseRegs::DeviceConfig::valueSwReset);
+		m_RegisterInterface.writeReg(
+			BaseRegs::DeviceConfig::reg,
+			BaseRegs::DeviceConfig::valueSwReset
+		);
 		delay(35);
 	}
 
 	bool initializeBase() {
 		// perform initialization step
-		i2c.writeReg(BaseRegs::GyroConfig::reg, BaseRegs::GyroConfig::value);
-		i2c.writeReg(BaseRegs::AccelConfig::reg, BaseRegs::AccelConfig::value);
-		i2c.writeReg(BaseRegs::FifoConfig0::reg, BaseRegs::FifoConfig0::value);
-		i2c.writeReg(BaseRegs::FifoConfig3::reg, BaseRegs::FifoConfig3::value);
-		i2c.writeReg(BaseRegs::PwrMgmt0::reg, BaseRegs::PwrMgmt0::value);
+		m_RegisterInterface.writeReg(
+			BaseRegs::GyroConfig::reg,
+			BaseRegs::GyroConfig::value
+		);
+		m_RegisterInterface.writeReg(
+			BaseRegs::AccelConfig::reg,
+			BaseRegs::AccelConfig::value
+		);
+		m_RegisterInterface.writeReg(
+			BaseRegs::FifoConfig0::reg,
+			BaseRegs::FifoConfig0::value
+		);
+		m_RegisterInterface.writeReg(
+			BaseRegs::FifoConfig3::reg,
+			BaseRegs::FifoConfig3::value
+		);
+		m_RegisterInterface.writeReg(
+			BaseRegs::PwrMgmt0::reg,
+			BaseRegs::PwrMgmt0::value
+		);
 		delay(1);
 
 		return true;
 	}
 
-	float getDirectTemp() const {
-		const auto value = static_cast<int16_t>(i2c.readReg16(BaseRegs::TempData));
-		float result = ((float)value / 132.48f) + 25.0f;
-		return result;
-	}
+	template <typename AccelCall, typename GyroCall, typename TempCall>
+	void bulkRead(
+		AccelCall&& processAccelSample,
+		GyroCall&& processGyroSample,
+		TempCall&& processTemperatureSample
+	) {
+		// Allocate statically so that it does not take up stack space, which
+		// can result in stack overflow and panic
+		constexpr size_t MaxReadings = 8;
+		static std::array<uint8_t, FullFifoEntrySize * MaxReadings> read_buffer;
 
-	template <typename AccelCall, typename GyroCall>
-	void bulkRead(AccelCall&& processAccelSample, GyroCall&& processGyroSample) {
-		const auto fifo_packets = i2c.readReg16(BaseRegs::FifoCount);
-		const auto fifo_bytes = fifo_packets * sizeof(FullFifoEntrySize);
+		constexpr int16_t InvalidReading = -32768;
 
-		std::array<uint8_t, FullFifoEntrySize * 8> read_buffer;  // max 8 readings
-		const auto bytes_to_read = std::min(
-									   static_cast<size_t>(read_buffer.size()),
-									   static_cast<size_t>(fifo_bytes)
-								   )
-								 / FullFifoEntrySize * FullFifoEntrySize;
-		i2c.readBytes(BaseRegs::FifoData, bytes_to_read, read_buffer.data());
+		size_t fifo_packets = m_RegisterInterface.readReg16(BaseRegs::FifoCount);
+
+		if (fifo_packets >= 1) {
+			//
+			// AN-000364
+			// 2.16 FIFO EMPTY EVENT IN STREAMING MODE CAN CORRUPT FIFO DATA
+			//
+			// Description: When in FIFO streaming mode, a FIFO empty event
+			// (caused by host reading the last byte of the last FIFO frame) can
+			// cause FIFO data corruption in the first FIFO frame that arrives
+			// after the FIFO empty condition. Once the issue is triggered, the
+			// FIFO state is compromised and cannot recover. FIFO must be set in
+			// bypass mode to flush out the wrong state
+			//
+			// When operating in FIFO streaming mode, if FIFO threshold
+			// interrupt is triggered with M number of FIFO frames accumulated
+			// in the FIFO buffer, the host should only read the first M-1
+			// number of FIFO frames. This prevents the FIFO empty event, that
+			// can cause FIFO data corruption, from happening.
+			//
+			--fifo_packets;
+		}
+
+		if (fifo_packets == 0) {
+			return;
+		}
+
+		fifo_packets = std::min(fifo_packets, MaxReadings);
+
+		size_t bytes_to_read = fifo_packets * FullFifoEntrySize;
+		m_RegisterInterface
+			.readBytes(BaseRegs::FifoData, bytes_to_read, read_buffer.data());
+
 		for (auto i = 0u; i < bytes_to_read; i += FullFifoEntrySize) {
+			uint8_t header = read_buffer[i];
+			bool has_gyro = header & (1 << 5);
+			bool has_accel = header & (1 << 6);
+
 			FifoEntryAligned entry;
 			memcpy(
-				entry.raw,
+				&entry,
 				&read_buffer[i + 0x1],
 				sizeof(FifoEntryAligned)
 			);  // skip fifo header
-			const int32_t gyroData[3]{
-				static_cast<int32_t>(entry.part.gyro[0]) << 4
-					| (entry.part.lsb[0] & 0xf),
-				static_cast<int32_t>(entry.part.gyro[1]) << 4
-					| (entry.part.lsb[1] & 0xf),
-				static_cast<int32_t>(entry.part.gyro[2]) << 4
-					| (entry.part.lsb[2] & 0xf),
-			};
-			processGyroSample(gyroData, GyrTs);
 
-			if (entry.part.accel[0] != -32768) {
+			if (has_gyro && entry.gyro[0] != InvalidReading) {
+				const int32_t gyroData[3]{
+					static_cast<int32_t>(entry.gyro[0]) << 4 | (entry.lsb[0] & 0xf),
+					static_cast<int32_t>(entry.gyro[1]) << 4 | (entry.lsb[1] & 0xf),
+					static_cast<int32_t>(entry.gyro[2]) << 4 | (entry.lsb[2] & 0xf),
+				};
+				processGyroSample(gyroData, GyrTs);
+			}
+
+			if (has_accel && entry.accel[0] != InvalidReading) {
 				const int32_t accelData[3]{
-					static_cast<int32_t>(entry.part.accel[0]) << 4
-						| (static_cast<int32_t>(entry.part.lsb[0]) & 0xf0 >> 4),
-					static_cast<int32_t>(entry.part.accel[1]) << 4
-						| (static_cast<int32_t>(entry.part.lsb[1]) & 0xf0 >> 4),
-					static_cast<int32_t>(entry.part.accel[2]) << 4
-						| (static_cast<int32_t>(entry.part.lsb[2]) & 0xf0 >> 4),
+					static_cast<int32_t>(entry.accel[0]) << 4
+						| (static_cast<int32_t>((entry.lsb[0]) & 0xf0) >> 4),
+					static_cast<int32_t>(entry.accel[1]) << 4
+						| (static_cast<int32_t>((entry.lsb[1]) & 0xf0) >> 4),
+					static_cast<int32_t>(entry.accel[2]) << 4
+						| (static_cast<int32_t>((entry.lsb[2]) & 0xf0) >> 4),
 				};
 				processAccelSample(accelData, AccTs);
+			}
+
+			if (entry.temp != 0x8000) {
+				processTemperatureSample(static_cast<int16_t>(entry.temp), TempTs);
 			}
 		}
 	}
 };
 
-}  // namespace SlimeVR::Sensors::SoftFusion::Drivers
+};  // namespace SlimeVR::Sensors::SoftFusion::Drivers

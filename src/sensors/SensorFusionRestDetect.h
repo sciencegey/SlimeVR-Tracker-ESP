@@ -10,8 +10,7 @@
 #define SENSOR_FUSION_WITH_RESTDETECT 0
 #endif
 
-namespace SlimeVR {
-namespace Sensors {
+namespace SlimeVR::Sensors {
 #if !SENSOR_FUSION_WITH_RESTDETECT
 struct SensorRestDetectionParams : RestDetectionParams {
 	SensorRestDetectionParams()
@@ -33,6 +32,21 @@ public:
 	{
 	}
 
+#if SENSOR_USE_VQF
+	SensorFusionRestDetect(
+		VQFParams vqfParams,
+		float gyrTs,
+		float accTs = -1.0,
+		float magTs = -1.0
+	)
+		: SensorFusion(vqfParams, gyrTs, accTs, magTs)
+#if !SENSOR_FUSION_WITH_RESTDETECT
+		, restDetection(restDetectionParams, gyrTs, (accTs < 0) ? gyrTs : accTs)
+#endif
+	{
+	}
+#endif
+
 	bool getRestDetected();
 
 #if !SENSOR_FUSION_WITH_RESTDETECT
@@ -45,7 +59,6 @@ protected:
 	RestDetection restDetection;
 #endif
 };
-}  // namespace Sensors
-}  // namespace SlimeVR
+}  // namespace SlimeVR::Sensors
 
 #endif  // SLIMEVR_SENSORFUSIONRESTDETECT_H_

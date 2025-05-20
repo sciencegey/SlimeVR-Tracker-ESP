@@ -27,6 +27,7 @@
 #include "Wire.h"
 #include "batterymonitor.h"
 #include "credentials.h"
+#include "debugging/TimeTaken.h"
 #include "globals.h"
 #include "logging/Logger.h"
 #include "ota.h"
@@ -36,11 +37,15 @@
 Timer<> globalTimer;
 SlimeVR::Logging::Logger logger("SlimeVR");
 SlimeVR::Sensors::SensorManager sensorManager;
-SlimeVR::LEDManager ledManager(LED_PIN);
+SlimeVR::LEDManager ledManager;
 SlimeVR::Status::StatusManager statusManager;
 SlimeVR::Configuration::Configuration configuration;
 SlimeVR::Network::Manager networkManager;
 SlimeVR::Network::Connection networkConnection;
+
+#if DEBUG_MEASURE_SENSOR_TIME_TAKEN
+SlimeVR::Debugging::TimeTakenMeasurer sensorMeasurer{"Sensors"};
+#endif
 
 int sensorToCalibrate = -1;
 bool blinking = false;
@@ -73,7 +78,7 @@ void setup() {
 	// this, check needs to be re-added.
 	auto clearResult = I2CSCAN::clearBus(PIN_IMU_SDA, PIN_IMU_SCL);
 	if (clearResult != 0) {
-		logger.error("Can't clear I2C bus, error %d", clearResult);
+		logger.warn("Can't clear I2C bus, error %d", clearResult);
 	}
 
 	// join I2C bus
@@ -119,7 +124,15 @@ void loop() {
 	SerialCommands::update();
 	OTA::otaUpdate();
 	networkManager.update();
+
+#if DEBUG_MEASURE_SENSOR_TIME_TAKEN
+	sensorMeasurer.before();
+#endif
 	sensorManager.update();
+#if DEBUG_MEASURE_SENSOR_TIME_TAKEN
+	sensorMeasurer.after();
+#endif
+
 	battery.Loop();
 	ledManager.update();
 	I2CSCAN::update();

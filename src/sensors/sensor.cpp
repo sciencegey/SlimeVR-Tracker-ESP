@@ -33,6 +33,7 @@ SensorStatus Sensor::getSensorState() {
 
 void Sensor::setAcceleration(Vector3 a) {
 	acceleration = a;
+	sensorOffset.sandwich(acceleration);
 	newAcceleration = true;
 }
 
@@ -90,13 +91,17 @@ void Sensor::resetTemperatureCalibrationState() {
 	printTemperatureCalibrationUnsupported();
 };
 
-uint16_t Sensor::getSensorConfigData() {
-	SlimeVR::Configuration::SensorConfig sensorConfig
-		= configuration.getSensor(sensorId);
-	return SlimeVR::Configuration::configDataToNumber(
-		&sensorConfig,
-		magStatus != MagnetometerStatus::MAG_NOT_SUPPORTED
-	);
+SlimeVR::Configuration::SensorConfigBits Sensor::getSensorConfigData() {
+	return SlimeVR::Configuration::SensorConfigBits{
+		.magEnabled = toggles.getToggle(SensorToggles::MagEnabled),
+		.magSupported = isFlagSupported(SensorToggles::MagEnabled),
+		.calibrationEnabled = toggles.getToggle(SensorToggles::CalibrationEnabled),
+		.calibrationSupported = isFlagSupported(SensorToggles::CalibrationEnabled),
+		.tempGradientCalibrationEnabled
+		= toggles.getToggle(SensorToggles::TempGradientCalibrationEnabled),
+		.tempGradientCalibrationSupported
+		= isFlagSupported(SensorToggles::TempGradientCalibrationEnabled),
+	};
 }
 
 const char* getIMUNameByType(SensorTypeID imuType) {
@@ -135,6 +140,8 @@ const char* getIMUNameByType(SensorTypeID imuType) {
 			return "ICM45686";
 		case SensorTypeID::ICM45605:
 			return "ICM45605";
+		case SensorTypeID::ADC_RESISTANCE:
+			return "ADC Resistance";
 		case SensorTypeID::Unknown:
 		case SensorTypeID::Empty:
 			return "UNKNOWN";
@@ -147,4 +154,15 @@ void Sensor::markRestCalibrationComplete(bool completed) {
 		m_Logger.info("Rest calibration completed");
 	}
 	restCalibrationComplete = completed;
+}
+
+void Sensor::setFlag(SensorToggles toggle, bool state) {
+	assert(isFlagSupported(toggle));
+
+	toggles.setToggle(toggle, state);
+
+	configuration.setSensorToggles(sensorId, toggles);
+	configuration.save();
+
+	motionSetup();
 }

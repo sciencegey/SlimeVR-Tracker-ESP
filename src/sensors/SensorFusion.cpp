@@ -1,7 +1,6 @@
 #include "SensorFusion.h"
 
-namespace SlimeVR {
-namespace Sensors {
+namespace SlimeVR::Sensors {
 
 void SensorFusion::update6D(
 	sensor_real_t Axyz[3],
@@ -211,5 +210,11 @@ void SensorFusion::calcLinearAcc(
 	accout[1] = accin[1] - gravVec[1] * CONST_EARTH_GRAVITY;
 	accout[2] = accin[2] - gravVec[2] * CONST_EARTH_GRAVITY;
 }
-}  // namespace Sensors
-}  // namespace SlimeVR
+
+#if SENSOR_USE_VQF
+void SensorFusion::updateBiasForgettingTime(float biasForgettingTime) {
+	vqf.updateBiasForgettingTime(biasForgettingTime);
+}
+#endif
+
+}  // namespace SlimeVR::Sensors
